@@ -1,0 +1,10 @@
+# Obsidian設定
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+
+# トークンなどの機密情報
+reference/GitHubトークン管理.md
+
+# OSが勝手に作るファイル
+Thumbs.db
+.DS_Store
