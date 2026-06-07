@@ -1,0 +1,795 @@
+資料② Chrome拡張機能の雛形コード一式
+構成： 5つのファイルを作ります。すべてテキストファイルなので、メモ帳やObsidianで作成できます。
+準備：フォルダを作る
+エクスプローラー（Windowsキー + E）で以下の場所にフォルダを作ってください。
+
+C:\Users\yasua\Documents\chrome-extensions\genspark-memory-bridge\
+
+場所はどこでも構いませんが、わかりやすい所に。
+この中に以下の5ファイルを作ります。
+
+genspark-memory-bridge/
+├── manifest.json
+├── content_script.js
+├── background.js
+├── popup.html
+└── popup.js
+
+________________________________________
+ファイル1：manifest.json
+Chrome拡張の「設計図」です。「この拡張は何ができて、どのサイトで動くか」を宣言します。
+
+{
+  "manifest_version": 3,
+  "name": "Genspark Memory Bridge",
+  "version": "0.1.0",
+  "description": "Gensparkチャットの保存・復元を行うメモリブリッジ",
+
+  "permissions": [
+    "storage",
+    "clipboardWrite",
+    "activeTab"
+  ],
+
+  "host_permissions": [
+    "https://www.genspark.ai/*",
+    "https://api.github.com/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://www.genspark.ai/*"],
+      "js": ["content_script.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Genspark Memory Bridge"
+  }
+}
+
+各部分の意味：
+•	manifest_version: 3 → Chrome拡張の最新規格
+•	permissions → 拡張が使う機能（設定の保存、クリップボード、現在のタブ）
+•	host_permissions → アクセスするサイト（Gensparkの画面とGitHub API）
+•	content_scripts → Gensparkのページが開かれたときに自動で注入されるスクリプト
+•	action → 拡張アイコンをクリックしたときに開くポップアップ画面
+________________________________________
+ファイル2：content_script.js
+Gensparkのページに自動で注入されるスクリプトです。チャットの内容を読み取る役割を担います。
+
+// ============================================
+// Genspark Memory Bridge - Content Script
+// Gensparkのチャットページに注入され、
+// チャット内容の監視・抽出を行う
+// ============================================
+
+(function () {
+  "use strict";
+
+  // --- 設定 ---
+  // DOM解析後にここのセレクタを更新する（T0-3で決定）
+  const SELECTORS = {
+    // チャット全体を囲むコンテナ要素
+    chatContainer: "[data-chat-container], .chat-container, main",
+    // 個別メッセージの要素
+    message: "[data-message], .message-item",
+    // ユーザーの発言を示す要素（クラス名やdata属性）
+    userMessage: "[data-role='user'], .user-message",
+    // AIの応答を示す要素
+    aiMessage: "[data-role='assistant'], .ai-message",
+    // チャット名が表示されている要素
+    chatTitle: "[data-chat-title], .chat-title, h1",
+  };
+
+  // --- チャット内容を抽出する関数 ---
+  function extractMessages() {
+    const messages = [];
+    const messageElements = document.querySelectorAll(SELECTORS.message);
+
+    messageElements.forEach((el, index) => {
+      const isUser = el.matches(SELECTORS.userMessage) ||
+                     el.closest(SELECTORS.userMessage) !== null;
+      const role = isUser ? "User" : "AI";
+      const text = el.innerText.trim();
+
+      if (text) {
+        messages.push({
+          index: index,
+          role: role,
+          content: text,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    });
+
+    return messages;
+  }
+
+  // --- チャット名を取得する関数 ---
+  function getChatTitle() {
+    const titleEl = document.querySelector(SELECTORS.chatTitle);
+    return titleEl ? titleEl.innerText.trim() : "untitled";
+  }
+
+  // --- Markdown形式に変換する関数 ---
+  function toMarkdown(messages, chatTitle) {
+    const now = new Date().toISOString().split("T")[0];
+    let md = `# ${chatTitle}\n`;
+    md += `> 保存日時: ${new Date().toISOString()}\n\n`;
+    md += `---\n\n`;
+
+    messages.forEach((msg) => {
+      md += `## ${msg.role}\n\n`;
+      md += `${msg.content}\n\n`;
+      md += `---\n\n`;
+    });
+
+    return md;
+  }
+
+  // --- DOMの変更を監視する（MutationObserver）---
+  // 新しいメッセージが追加されたことを検知するための仕組み
+  let observer = null;
+
+  function startObserving() {
+    const container = document.querySelector(SELECTORS.chatContainer);
+    if (!container) {
+      // コンテナが見つからない場合、1秒後に再試行
+      console.log("[MemoryBridge] チャットコンテナが見つかりません。1秒後に再試行...");
+      setTimeout(startObserving, 1000);
+      return;
+    }
+
+    observer = new MutationObserver((mutations) => {
+      // 新しいメッセージが追加されたときに呼ばれる
+      // 現時点ではログ出力のみ（Phase 1で本実装）
+      for (const mutation of mutations) {
+        if (mutation.addedNodes.length > 0) {
+          console.log("[MemoryBridge] 新しいDOM要素を検出:", mutation.addedNodes.length, "個");
+        }
+      }
+    });
+
+    observer.observe(container, {
+      childList: true,   // 子要素の追加・削除を監視
+      subtree: true,     // 孫要素以下も監視
+    });
+
+    console.log("[MemoryBridge] DOM監視を開始しました");
+  }
+
+  // --- background.js との通信 ---
+  // ポップアップや background.js からの指示を受け取る
+  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+
+    if (request.action === "extractChat") {
+      // 「チャット内容を抽出して」という指示
+      const messages = extractMessages();
+      const title = getChatTitle();
+      const markdown = toMarkdown(messages, title);
+      sendResponse({
+        success: true,
+        title: title,
+        markdown: markdown,
+        messageCount: messages.length,
+      });
+    }
+
+    if (request.action === "getChatTitle") {
+      // 「チャット名を教えて」という指示
+      sendResponse({
+        success: true,
+        title: getChatTitle(),
+      });
+    }
+
+    if (request.action === "ping") {
+      // 「動いてる？」という確認
+      sendResponse({ success: true, message: "Content script is active" });
+    }
+
+    // 非同期レスポンスのために true を返す
+    return true;
+  });
+
+  // --- 起動処理 ---
+  console.log("[MemoryBridge] Content script が読み込まれました");
+  console.log("[MemoryBridge] 現在のURL:", window.location.href);
+
+  // DOM監視を開始
+  startObserving();
+
+})();
+
+________________________________________
+ファイル3：background.js
+GitHub APIとの通信を担当するスクリプトです。裏方として常に動いています。
+
+// ============================================
+// Genspark Memory Bridge - Background Script (Service Worker)
+// GitHub APIとの通信、データの中継を行う
+// ============================================
+
+// --- GitHub APIへファイルを保存する関数 ---
+async function saveToGitHub(token, repo, path, content, commitMessage) {
+  const url = `https://api.github.com/repos/${repo}/contents/${path}`;
+
+  // まず既存ファイルがあるか確認（更新にはSHAが必要）
+  let sha = null;
+  try {
+    const checkResponse = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github.v3+json",
+      },
+    });
+    if (checkResponse.ok) {
+      const existing = await checkResponse.json();
+      sha = existing.sha;
+    }
+  } catch (e) {
+    // ファイルが存在しない場合はそのまま新規作成
+  }
+
+  // ファイルを保存（Base64エンコードが必要）
+  const body = {
+    message: commitMessage,
+    content: btoa(unescape(encodeURIComponent(content))),
+  };
+  if (sha) {
+    body.sha = sha; // 既存ファイルの更新時にはSHAが必要
+  }
+
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github.v3+json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(`GitHub API エラー: ${response.status} - ${errorData.message}`);
+  }
+
+  return await response.json();
+}
+
+// --- GitHubからファイルを読み込む関数 ---
+async function readFromGitHub(token, repo, path) {
+  const url = `https://api.github.com/repos/${repo}/contents/${path}`;
+
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github.v3+json",
+    },
+  });
+
+  if (!response.ok) {
+    if (response.status === 404) {
+      return null; // ファイルが存在しない
+    }
+    throw new Error(`GitHub API エラー: ${response.status}`);
+  }
+
+  const data = await response.json();
+  // GitHub APIはBase64でファイル内容を返すのでデコードする
+  const content = decodeURIComponent(escape(atob(data.content)));
+  return content;
+}
+
+// --- GitHubのフォルダ内のファイル一覧を取得する関数 ---
+async function listFiles(token, repo, path) {
+  const url = `https://api.github.com/repos/${repo}/contents/${path}`;
+
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github.v3+json",
+    },
+  });
+
+  if (!response.ok) {
+    return [];
+  }
+
+  const data = await response.json();
+  if (!Array.isArray(data)) return [];
+
+  return data.map((item) => item.name);
+}
+
+// --- 設定を読み込む関数 ---
+async function getSettings() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(
+      ["githubToken", "githubRepo", "githubUser"],
+      (result) => {
+        resolve({
+          token: result.githubToken || "",
+          repo: result.githubRepo || "",
+          user: result.githubUser || "",
+        });
+      }
+    );
+  });
+}
+
+// --- content_scriptやpopupからのメッセージを受け取る ---
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+
+  if (request.action === "saveChat") {
+    // チャットをGitHubに保存する
+    (async () => {
+      try {
+        const settings = await getSettings();
+        if (!settings.token || !settings.repo) {
+          sendResponse({ success: false, error: "GitHub設定が未完了です" });
+          return;
+        }
+
+        const path = `chats/${request.fileName}`;
+        const fullRepo = `${settings.user}/${settings.repo}`;
+        const result = await saveToGitHub(
+          settings.token,
+          fullRepo,
+          path,
+          request.content,
+          `チャット保存: ${request.fileName}`
+        );
+
+        sendResponse({ success: true, result: result });
+      } catch (error) {
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true; // 非同期レスポンス
+  }
+
+  if (request.action === "loadContext") {
+    // 前回チャットとドキュメントをGitHubから読み込む
+    (async () => {
+      try {
+        const settings = await getSettings();
+        if (!settings.token || !settings.repo) {
+          sendResponse({ success: false, error: "GitHub設定が未完了です" });
+          return;
+        }
+
+        const fullRepo = `${settings.user}/${settings.repo}`;
+        const context = {};
+
+        // 前回チャットログを取得
+        if (request.previousChatFile) {
+          context.previousChat = await readFromGitHub(
+            settings.token,
+            fullRepo,
+            `chats/${request.previousChatFile}`
+          );
+        }
+
+        // 引き継ぎドキュメントを取得
+        context.handoverDoc = await readFromGitHub(
+          settings.token,
+          fullRepo,
+          "docs/引き継ぎドキュメント.md"
+        );
+
+        // ローリングサマリーを取得
+        context.summary = await readFromGitHub(
+          settings.token,
+          fullRepo,
+          "summaries/rolling_summary.md"
+        );
+
+        sendResponse({ success: true, context: context });
+      } catch (error) {
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true;
+  }
+
+  if (request.action === "listChats") {
+    // 保存済みチャットの一覧を取得
+    (async () => {
+      try {
+        const settings = await getSettings();
+        const fullRepo = `${settings.user}/${settings.repo}`;
+        const files = await listFiles(settings.token, fullRepo, "chats");
+        sendResponse({ success: true, files: files });
+      } catch (error) {
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true;
+  }
+});
+
+console.log("[MemoryBridge] Background script が起動しました");
+
+________________________________________
+ファイル4：popup.html
+拡張アイコンをクリックしたときに表示される画面です。
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      width: 380px;
+      font-family: "Segoe UI", "Meiryo", sans-serif;
+      font-size: 13px;
+      color: #333;
+      padding: 16px;
+      background: #fafafa;
+    }
+
+    h1 {
+      font-size: 15px;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 2px solid #4a90d9;
+      color: #2c3e50;
+    }
+
+    .section {
+      margin-bottom: 16px;
+      padding: 12px;
+      background: white;
+      border: 1px solid #e0e0e0;
+      border-radius: 6px;
+    }
+
+    .section h2 {
+      font-size: 13px;
+      margin-bottom: 8px;
+      color: #555;
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 4px;
+      margin-top: 8px;
+    }
+
+    input[type="text"],
+    input[type="password"] {
+      width: 100%;
+      padding: 6px 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+
+    button {
+      display: block;
+      width: 100%;
+      padding: 8px;
+      margin-top: 8px;
+      border: none;
+      border-radius: 4px;
+      font-size: 13px;
+      cursor: pointer;
+      color: white;
+    }
+
+    .btn-save-settings {
+      background: #6c757d;
+    }
+
+    .btn-save-chat {
+      background: #4a90d9;
+    }
+
+    .btn-load-context {
+      background: #28a745;
+    }
+
+    .btn-copy-context {
+      background: #17a2b8;
+    }
+
+    button:hover {
+      opacity: 0.9;
+    }
+
+    #status {
+      margin-top: 12px;
+      padding: 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      display: none;
+    }
+
+    #status.success {
+      display: block;
+      background: #d4edda;
+      color: #155724;
+      border: 1px solid #c3e6cb;
+    }
+
+    #status.error {
+      display: block;
+      background: #f8d7da;
+      color: #721c24;
+      border: 1px solid #f5c6cb;
+    }
+
+    #status.info {
+      display: block;
+      background: #d1ecf1;
+      color: #0c5460;
+      border: 1px solid #bee5eb;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Genspark Memory Bridge</h1>
+
+  <!-- GitHub設定セクション -->
+  <div class="section">
+    <h2>GitHub設定</h2>
+
+    <label>GitHubユーザー名</label>
+    <input type="text" id="githubUser" placeholder="例: yasuaki">
+
+    <label>リポジトリ名</label>
+    <input type="text" id="githubRepo" value="genspark-memory-bridge">
+
+    <label>Personal Access Token</label>
+    <input type="password" id="githubToken" placeholder="github_pat_...">
+
+    <button class="btn-save-settings" id="btnSaveSettings">設定を保存</button>
+  </div>
+
+  <!-- チャット保存セクション -->
+  <div class="section">
+    <h2>チャット保存</h2>
+
+    <label>保存ファイル名</label>
+    <input type="text" id="saveFileName" placeholder="例: OpenClaw_001.md">
+
+    <button class="btn-save-chat" id="btnSaveChat">チャットをGitHubに保存</button>
+  </div>
+
+  <!-- コンテキスト復元セクション -->
+  <div class="section">
+    <h2>コンテキスト復元</h2>
+
+    <label>読み込む前回チャットファイル名</label>
+    <input type="text" id="loadFileName" placeholder="例: OpenClaw_001.md">
+
+    <button class="btn-load-context" id="btnLoadContext">コンテキストを読み込み</button>
+    <button class="btn-copy-context" id="btnCopyContext">クリップボードにコピー</button>
+  </div>
+
+  <!-- ステータス表示 -->
+  <div id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
+
+________________________________________
+ファイル5：popup.js
+ポップアップ画面のボタンが押されたときの動作を定義するスクリプトです。
+
+// ============================================
+// Genspark Memory Bridge - Popup Script
+// ポップアップ画面のUI操作を処理する
+// ============================================
+
+// --- ステータスメッセージを表示する関数 ---
+function showStatus(message, type) {
+  const statusEl = document.getElementById("status");
+  statusEl.textContent = message;
+  statusEl.className = type; // "success", "error", "info"
+
+  // 5秒後に自動で消える
+  setTimeout(() => {
+    statusEl.className = "";
+    statusEl.style.display = "none";
+  }, 5000);
+}
+
+// --- ページ読み込み時：保存済みの設定を復元 ---
+document.addEventListener("DOMContentLoaded", () => {
+  chrome.storage.local.get(
+    ["githubToken", "githubRepo", "githubUser"],
+    (result) => {
+      if (result.githubUser) {
+        document.getElementById("githubUser").value = result.githubUser;
+      }
+      if (result.githubRepo) {
+        document.getElementById("githubRepo").value = result.githubRepo;
+      }
+      if (result.githubToken) {
+        document.getElementById("githubToken").value = result.githubToken;
+      }
+    }
+  );
+});
+
+// --- 設定を保存ボタン ---
+document.getElementById("btnSaveSettings").addEventListener("click", () => {
+  const user = document.getElementById("githubUser").value.trim();
+  const repo = document.getElementById("githubRepo").value.trim();
+  const token = document.getElementById("githubToken").value.trim();
+
+  if (!user || !repo || !token) {
+    showStatus("すべての項目を入力してください", "error");
+    return;
+  }
+
+  chrome.storage.local.set(
+    { githubUser: user, githubRepo: repo, githubToken: token },
+    () => {
+      showStatus("設定を保存しました", "success");
+    }
+  );
+});
+
+// --- チャットをGitHubに保存ボタン ---
+document.getElementById("btnSaveChat").addEventListener("click", async () => {
+  const fileName = document.getElementById("saveFileName").value.trim();
+  if (!fileName) {
+    showStatus("ファイル名を入力してください", "error");
+    return;
+  }
+
+  showStatus("チャットを抽出中...", "info");
+
+  // content_scriptにチャット内容の抽出を依頼
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+  chrome.tabs.sendMessage(tab.id, { action: "extractChat" }, (response) => {
+    if (chrome.runtime.lastError) {
+      showStatus(
+        "Gensparkのページを開いた状態で実行してください",
+        "error"
+      );
+      return;
+    }
+
+    if (!response || !response.success) {
+      showStatus("チャットの抽出に失敗しました", "error");
+      return;
+    }
+
+    showStatus(`${response.messageCount}件のメッセージを抽出。保存中...`, "info");
+
+    // background.jsにGitHub保存を依頼
+    chrome.runtime.sendMessage(
+      {
+        action: "saveChat",
+        fileName: fileName,
+        content: response.markdown,
+      },
+      (saveResponse) => {
+        if (saveResponse && saveResponse.success) {
+          showStatus(`保存完了: ${fileName}`, "success");
+        } else {
+          showStatus(
+            `保存失敗: ${saveResponse ? saveResponse.error : "不明なエラー"}`,
+            "error"
+          );
+        }
+      }
+    );
+  });
+});
+
+// --- コンテキストの一時保存用 ---
+let loadedContext = null;
+
+// --- コンテキストを読み込みボタン ---
+document.getElementById("btnLoadContext").addEventListener("click", () => {
+  const fileName = document.getElementById("loadFileName").value.trim();
+
+  showStatus("コンテキストを読み込み中...", "info");
+
+  chrome.runtime.sendMessage(
+    {
+      action: "loadContext",
+      previousChatFile: fileName || null,
+    },
+    (response) => {
+      if (response && response.success) {
+        loadedContext = response.context;
+
+        const parts = [];
+        if (loadedContext.handoverDoc) parts.push("引き継ぎドキュメント");
+        if (loadedContext.summary) parts.push("サマリー");
+        if (loadedContext.previousChat) parts.push("前回チャット");
+
+        showStatus(
+          `読み込み完了: ${parts.join(", ")}（「クリップボードにコピー」を押してください）`,
+          "success"
+        );
+      } else {
+        showStatus(
+          `読み込み失敗: ${response ? response.error : "不明なエラー"}`,
+          "error"
+        );
+      }
+    }
+  );
+});
+
+// --- クリップボードにコピーボタン ---
+document.getElementById("btnCopyContext").addEventListener("click", async () => {
+  if (!loadedContext) {
+    showStatus("先に「コンテキストを読み込み」を実行してください", "error");
+    return;
+  }
+
+  // コンテキストを1つのテキストにまとめる
+  let fullContext = "";
+
+  if (loadedContext.handoverDoc) {
+    fullContext += "=== 引き継ぎドキュメント ===\n\n";
+    fullContext += loadedContext.handoverDoc;
+    fullContext += "\n\n";
+  }
+
+  if (loadedContext.summary) {
+    fullContext += "=== ローリングサマリー ===\n\n";
+    fullContext += loadedContext.summary;
+    fullContext += "\n\n";
+  }
+
+  if (loadedContext.previousChat) {
+    fullContext += "=== 前回チャットログ ===\n\n";
+    fullContext += loadedContext.previousChat;
+    fullContext += "\n\n";
+  }
+
+  try {
+    await navigator.clipboard.writeText(fullContext);
+    showStatus(
+      `クリップボードにコピーしました（${fullContext.length}文字）。Gensparkのチャット欄にCtrl+Vで貼り付けてください`,
+      "success"
+    );
+  } catch (err) {
+    showStatus("クリップボードへのコピーに失敗しました", "error");
+  }
+});
+
+________________________________________
+Chromeにインストールする方法
+1.	Chromeのアドレスバーに chrome://extensions と入力してEnter
+2.	右上の「デベロッパーモード」のスイッチを ON にする
+3.	左上に表示される「パッケージ化されていない拡張機能を読み込む」をクリック
+4.	先ほど作った genspark-memory-bridge フォルダを選択
+5.	拡張機能の一覧に「Genspark Memory Bridge」が表示されればインストール成功
+動作確認：
+1.	Gensparkのチャットページ（https://www.genspark.ai/）を開く
+2.	F12キー を押して開発者ツールを開く
+3.	「Console」タブを見る
+4.	[MemoryBridge] Content script が読み込まれました と表示されていれば、content_scriptの注入成功
+________________________________________
+重要な補足
+この雛形コードは 「動く骨格」 です。特に content_script.js の SELECTORS 定数に書いてあるセレクタ（data-chat-container など）は 仮の値 です。W1 Day2（5/2）のDOM解析で、Gensparkの実際のHTML構造を調べて、正しいセレクタに書き換える必要があります。書き換えが必要な箇所は SELECTORS の1か所に集約してあるので、そこだけ直せばOKです。
+
