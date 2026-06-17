@@ -5,6 +5,7 @@
 // T1-11 fix: クリップボードコピー時の空コンテキストガード追加（2026-05-29）
 // T2-3: 復元提案バナー＋一括復元ボタン追加（2026-05-31）
 // P3-2-2: 接続テストボタン追加（2026-06-07）
+// T1-13 fix: 保存成功時にloadFileNameへフルパス自動反映（2026-06-17）
 // ============================================
 
 // --------------------------------------------
@@ -139,6 +140,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   } catch (e) {
     console.warn("[MemoryBridge] 復元提案チェック失敗:", e);
   }
+
+  // T1-13 fix: 前回保存パスをストレージから復元してloadFileNameに反映
+  chrome.storage.local.get(["lastSavedChatPath"], (result) => {
+    if (result.lastSavedChatPath) {
+      const loadFileInput = document.getElementById("loadFileName");
+      if (!loadFileInput.value) {
+        loadFileInput.value = result.lastSavedChatPath;
+      }
+    }
+  });
 });
 
 // --------------------------------------------
@@ -247,6 +258,15 @@ document.getElementById("btnSaveChat").addEventListener("click", async () => {
         html += `<div style="margin-top:4px;"><a href="${escapeHtml(commitUrl)}" target="_blank" rel="noopener">GitHubで開く →</a></div>`;
       }
       showSaveResult(html, "success");
+
+      // T1-13 fix: 保存成功時にloadFileNameへフルパスを自動反映
+      if (filePath && filePath.startsWith("chats/")) {
+        const relativePath = filePath.replace(/^chats\//, "");
+        const loadFileInput = document.getElementById("loadFileName");
+        loadFileInput.value = relativePath;
+        // 次回ポップアップ起動時にも反映されるようストレージに保存
+        chrome.storage.local.set({ lastSavedChatPath: relativePath });
+      }
     } else {
       const errMsg = res && res.error ? res.error : "不明なエラー";
       showSaveResult(
@@ -260,14 +280,22 @@ document.getElementById("btnSaveChat").addEventListener("click", async () => {
 // --------------------------------------------
 // T2-3: 一括復元ボタン（復元提案バナー内・方針D）
 // loadContext + clipboard copy を1クリックで実行
+// T1-13 fix: lastSavedChatPathを自動適用（2026-06-17）
 // --------------------------------------------
 document.getElementById("btnRestore").addEventListener("click", async () => {
   setRestoreButtonBusy(true);
 
+  // T1-13 fix: ストレージから前回保存パスを取得して自動適用
+  const stored = await new Promise((resolve) => {
+    chrome.storage.local.get(["lastSavedChatPath"], (result) => {
+      resolve(result.lastSavedChatPath || null);
+    });
+  });
+
   chrome.runtime.sendMessage(
     {
       action: "loadContext",
-      previousChatFile: null,
+      previousChatFile: stored,
     },
     async (response) => {
       if (chrome.runtime.lastError) {
@@ -293,6 +321,12 @@ document.getElementById("btnRestore").addEventListener("click", async () => {
 
       let fullContext = "";
 
+      if (context.previousChat) {
+        fullContext += "=== 前回チャットログ ===\n\n";
+        fullContext += context.previousChat;
+        fullContext += "\n\n";
+      }
+
       if (context.handoverDoc) {
         fullContext += "=== 引き継ぎドキュメント ===\n\n";
         fullContext += context.handoverDoc;
@@ -302,12 +336,6 @@ document.getElementById("btnRestore").addEventListener("click", async () => {
       if (context.summary) {
         fullContext += "=== ローリングサマリー ===\n\n";
         fullContext += context.summary;
-        fullContext += "\n\n";
-      }
-
-      if (context.previousChat) {
-        fullContext += "=== 前回チャットログ ===\n\n";
-        fullContext += context.previousChat;
         fullContext += "\n\n";
       }
 
@@ -385,6 +413,12 @@ document.getElementById("btnCopyContext").addEventListener("click", async () => 
 
   let fullContext = "";
 
+  if (loadedContext.previousChat) {
+    fullContext += "=== 前回チャットログ ===\n\n";
+    fullContext += loadedContext.previousChat;
+    fullContext += "\n\n";
+  }
+
   if (loadedContext.handoverDoc) {
     fullContext += "=== 引き継ぎドキュメント ===\n\n";
     fullContext += loadedContext.handoverDoc;
@@ -394,12 +428,6 @@ document.getElementById("btnCopyContext").addEventListener("click", async () => 
   if (loadedContext.summary) {
     fullContext += "=== ローリングサマリー ===\n\n";
     fullContext += loadedContext.summary;
-    fullContext += "\n\n";
-  }
-
-  if (loadedContext.previousChat) {
-    fullContext += "=== 前回チャットログ ===\n\n";
-    fullContext += loadedContext.previousChat;
     fullContext += "\n\n";
   }
 

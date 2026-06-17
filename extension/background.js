@@ -7,6 +7,7 @@
 // T2-2: 復元提案フラグ管理・バッジ制御追加（2026-05-31）
 // P3-3-1: [FUTURE-PAID] マーキング追加（2026-06-06）
 // P3-2-2: 接続テストハンドラ追加（2026-06-07）
+// T1-13 fix: loadContext サブフォルダ対応（2026-06-17）
 // ============================================
 
 // ============================================
@@ -373,6 +374,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // --------------------------------------------
   // loadContext: 前回チャットとドキュメントをGitHubから読み込む
   // T1-11 fix: 全ファイル未取得時のガード追加（2026-05-29）
+  // T1-13 fix: サブフォルダ対応・自動検索追加（2026-06-17）
   // --------------------------------------------
   if (request.action === "loadContext") {
     (async () => {
@@ -388,13 +390,50 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         const fullRepo = `${settings.user}/${settings.repo}`;
         const context = {};
 
+        // --- T1-13 fix: previousChatFile のパス解決（サブフォルダ対応） ---
         if (request.previousChatFile) {
-          context.previousChat = await readFromGitHub(
-            settings.token,
-            fullRepo,
-            `chats/${request.previousChatFile}`
-          );
+          const chatFile = request.previousChatFile;
+
+          if (chatFile.includes('/')) {
+            // スラッシュを含む場合：サブフォルダ込みのパスとしてそのまま使用
+            context.previousChat = await readFromGitHub(
+              settings.token,
+              fullRepo,
+              `chats/${chatFile}`
+            );
+          } else {
+            // ファイル名のみの場合：まず chats/ 直下を試行
+            context.previousChat = await readFromGitHub(
+              settings.token,
+              fullRepo,
+              `chats/${chatFile}`
+            );
+
+            // 見つからなければ chats/ 配下のサブフォルダを検索
+            if (context.previousChat === null) {
+              try {
+                const chatEntries = await listFilesWithSha(settings.token, fullRepo, "chats");
+                const dirs = chatEntries.filter(e => e.type === "dir");
+
+                for (const dir of dirs) {
+                  const found = await readFromGitHub(
+                    settings.token,
+                    fullRepo,
+                    `chats/${dir.name}/${chatFile}`
+                  );
+                  if (found !== null) {
+                    context.previousChat = found;
+                    console.log(`[MemoryBridge] サブフォルダで発見: chats/${dir.name}/${chatFile}`);
+                    break;
+                  }
+                }
+              } catch (e) {
+                console.warn("[MemoryBridge] サブフォルダ検索スキップ:", e.message);
+              }
+            }
+          }
         }
+        // --- T1-13 fix ここまで ---
 
         context.handoverDoc = await readFromGitHub(
           settings.token,
